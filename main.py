@@ -374,13 +374,25 @@ def main():
     if not videos or not audios:
         return
 
-    log_info(f"Found {len(videos)} video(s) × {len(audios)} music track(s).\n")
+    total_tasks = len(videos) * len(audios)
+    log_info(f"Found {len(videos)} video(s) × {len(audios)} music track(s) = {total_tasks} output(s).\n")
 
     ok = fail = 0
+    current = 0
+
+    def print_progress():
+        pct = int(current / total_tasks * 100) if total_tasks else 100
+        bar_len = 30
+        filled = int(bar_len * current / total_tasks) if total_tasks else bar_len
+        bar = "█" * filled + "░" * (bar_len - filled)
+        sys.stdout.write(f"\r{_INF}  [{bar}] {pct}%  ({current}/{total_tasks}){_RST}  ")
+        sys.stdout.flush()
+
+    print_progress()
 
     for vi, vpath in enumerate(videos, 1):
         vname = os.path.basename(vpath)
-        print(f"{_DIM}[{vi}/{len(videos)}]{_RST} Video: {_INF}{vname}{_RST}")
+        print(f"\n{_DIM}[{vi}/{len(videos)}]{_RST} Video: {_INF}{vname}{_RST}")
 
         try:
             info = get_video_info(vpath)
@@ -415,11 +427,16 @@ def main():
                     log_error(f"  ✗ {vname} + {aname}: {e}")
                     fail += 1
 
+                current += 1
+                print_progress()
+
         except Exception as e:
             log_error(f"  Could not read '{vname}': {e}")
             fail += 1
+            current += len(audios)
+            print_progress()
 
-    print(f"\n{_INF}══════════════════════════════════════════════{_RST}")
+    print(f"\n\n{_INF}══════════════════════════════════════════════{_RST}")
     print(f"  {_OK}Done!{_RST}  Generated: {ok}  |  Failed: {fail}")
     print(f"  Output folder: {OUT_VIDEO_DIR}/")
     print(f"{_INF}══════════════════════════════════════════════{_RST}\n")
