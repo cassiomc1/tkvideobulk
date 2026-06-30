@@ -29,6 +29,11 @@ SUPPORTED_VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi"}
 SUPPORTED_AUDIO_EXTS = {".wav", ".mp3", ".flac", ".m4a"}
 
 # ── Logging helpers ──────────────────────────────────────────────────────────
+import threading
+import random
+import hashlib
+from concurrent.futures import ThreadPoolExecutor
+
 _RST = "\033[0m"
 _INF = "\033[94m"
 _OK  = "\033[92m"
@@ -36,10 +41,21 @@ _WRN = "\033[93m"
 _ERR = "\033[91m"
 _DIM = "\033[90m"
 
-def log_info(msg):    print(f"{_INF}[INFO]{_RST} {msg}")
-def log_success(msg): print(f"{_OK}[OK]{_RST} {msg}")
-def log_warning(msg): print(f"{_WRN}[WARN]{_RST} {msg}")
-def log_error(msg):   print(f"{_ERR}[ERROR]{_RST} {msg}")
+print_lock = threading.Lock()
+report_lock = threading.Lock()
+
+def log_info(msg):
+    with print_lock:
+        print(f"{_INF}[INFO]{_RST} {msg}")
+def log_success(msg):
+    with print_lock:
+        print(f"{_OK}[OK]{_RST} {msg}")
+def log_warning(msg):
+    with print_lock:
+        print(f"{_WRN}[WARN]{_RST} {msg}")
+def log_error(msg):
+    with print_lock:
+        print(f"{_ERR}[ERROR]{_RST} {msg}")
 
 # ── Prerequisite checks ─────────────────────────────────────────────────────
 def validate_ffmpeg():
@@ -127,7 +143,7 @@ def convert_to_wav(src, dst):
     )
 
 # ── Energy analysis ──────────────────────────────────────────────────────────
-def _analyze_wav_librosa(path, seg_dur):
+def _analyze_wav_librosa(path, seg_dur, peak_index=0):
     """Finds highest-energy window using librosa RMS + onset strength."""
     import librosa
     import numpy as np
@@ -154,14 +170,31 @@ def _analyze_wav_librosa(path, seg_dur):
         return 0.0, False
 
     sums = np.convolve(score, np.ones(win), mode="valid")
-    best = int(np.argmax(sums))
+    best1 = int(np.argmax(sums))
+    if peak_index == 0:
+        best = best1
+    else:
+        sums_copy = sums.copy()
+        start_idx = max(0, best1 - win)
+        end_idx = min(len(sums), best1 + win)
+        sums_copy[start_idx:end_idx] = -1e9
+        if np.max(sums_copy) < -1e8:
+            sums_copy = sums.copy()
+            start_idx = max(0, best1 - win // 2)
+            end_idx = min(len(sums), best1 + win // 2)
+            sums_copy[start_idx:end_idx] = -1e9
+        if np.max(sums_copy) < -1e8:
+            best = (best1 + len(sums) // 2) % len(sums)
+        else:
+            best = int(np.argmax(sums_copy))
+
     t = best * hop / sr
     if t + seg_dur > total:
         t = max(0.0, total - seg_dur)
     return t, False
 
 
-def _analyze_wav_numpy(path, seg_dur):
+def _analyze_wav_numpy(path, seg_dur, peak_index=0):
     """Fallback energy analyzer using raw scipy.io.wavfile + numpy."""
     import numpy as np
     from scipy.io import wavfile
@@ -207,14 +240,31 @@ def _analyze_wav_numpy(path, seg_dur):
         return 0.0, False
 
     sums = np.convolve(score, np.ones(win), mode="valid")
-    best = int(np.argmax(sums))
+    best1 = int(np.argmax(sums))
+    if peak_index == 0:
+        best = best1
+    else:
+        sums_copy = sums.copy()
+        start_idx = max(0, best1 - win)
+        end_idx = min(len(sums), best1 + win)
+        sums_copy[start_idx:end_idx] = -1e9
+        if np.max(sums_copy) < -1e8:
+            sums_copy = sums.copy()
+            start_idx = max(0, best1 - win // 2)
+            end_idx = min(len(sums), best1 + win // 2)
+            sums_copy[start_idx:end_idx] = -1e9
+        if np.max(sums_copy) < -1e8:
+            best = (best1 + len(sums) // 2) % len(sums)
+        else:
+            best = int(np.argmax(sums_copy))
+
     t = best * hop / sr
     if t + seg_dur > total:
         t = max(0.0, total - seg_dur)
     return t, False
 
 
-def analyze_audio(audio_path, seg_dur):
+def analyze_audio(audio_path, seg_dur, peak_index=0):
     """
     Converts audio to a temp WAV first (guarantees format compatibility),
     then runs energy analysis. Returns (start_time, should_loop).
@@ -224,18 +274,19 @@ def analyze_audio(audio_path, seg_dur):
     if dur is not None and dur <= seg_dur:
         return 0.0, True
 
-    # Always convert to temp WAV to avoid codec/seeking issues in analysis
-    tmp = os.path.join(tempfile.gettempdir(), f"tkvb_{os.getpid()}_{sanitize_name(audio_path)}.wav")
+    # Thread-safe temp file naming by including thread identifier
+    tid = threading.get_ident()
+    tmp = os.path.join(tempfile.gettempdir(), f"tkvb_{os.getpid()}_{tid}_{sanitize_name(audio_path)}.wav")
     try:
         convert_to_wav(audio_path, tmp)
 
         # Try librosa first, fall back to numpy
         try:
-            return _analyze_wav_librosa(tmp, seg_dur)
+            return _analyze_wav_librosa(tmp, seg_dur, peak_index=peak_index)
         except Exception as e:
             log_warning(f"Librosa failed ({e}), falling back to NumPy analyser.")
             try:
-                return _analyze_wav_numpy(tmp, seg_dur)
+                return _analyze_wav_numpy(tmp, seg_dur, peak_index=peak_index)
             except Exception as e2:
                 log_error(f"NumPy analyser also failed: {e2}")
                 return 0.0, False
@@ -343,8 +394,9 @@ def append_report(video_name, music_name, start_time, looped, duration, output_n
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     mode = "loop" if looped else f"{start_time:.2f}s"
     line = f"[{ts}]  {output_name}  |  video={video_name}  music={music_name}  start={mode}  dur={duration:.2f}s"
-    with open(REPORT_FILE, "a", encoding="utf-8") as f:
-        f.write(line + "\n")
+    with report_lock:
+        with open(REPORT_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
 
 # ── File scanner ─────────────────────────────────────────────────────────────
 def scan_files(directory, exts):
@@ -355,10 +407,50 @@ def scan_files(directory, exts):
         if e.is_file() and os.path.splitext(e.name)[1].lower() in exts
     )
 
+# ── Task Worker ──────────────────────────────────────────────────────────────
+progress_counter = 0
+progress_lock = threading.Lock()
+
+def process_task(vpath, apath, peak_index, total_tasks):
+    global progress_counter
+    vname = os.path.basename(vpath)
+    aname = os.path.basename(apath)
+    
+    try:
+        info = get_video_info(vpath)
+        dur = info["duration"]
+        dur_str = format_duration(dur)
+        sv = sanitize_name(vpath)
+        sa = sanitize_name(apath)
+
+        log_info(f"Analyzing audio '{aname}' (peak {peak_index+1}) for video '{vname}'...")
+        t0, loop = analyze_audio(apath, dur, peak_index=peak_index)
+
+        # Append suffix to denote the music version (peak index)
+        sa_with_peak = f"{sa}_v{peak_index+1}"
+        out = unique_output_path(sv, dur_str, sa_with_peak)
+        outname = os.path.basename(out)
+        
+        log_info(f"Rendering: {vname} + {aname} (peak {peak_index+1}) -> {outname}")
+        render(vpath, apath, t0, loop, dur, out, info)
+        append_report(vname, f"{aname} (peak {peak_index+1})", t0, loop, dur, outname)
+        log_success(f"Successfully generated: {outname}")
+        
+        with progress_lock:
+            progress_counter += 1
+            pct = int(progress_counter / total_tasks * 100)
+            print(f"{_OK}[PROGRESS]{_RST} {progress_counter}/{total_tasks} ({pct}%) completed.")
+        return True
+    except Exception as e:
+        log_error(f"Failed to process {vname} with {aname} (peak {peak_index+1}): {e}")
+        with progress_lock:
+            progress_counter += 1
+        return False
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 def main():
     print(f"\n{_INF}╔══════════════════════════════════════════════╗{_RST}")
-    print(f"{_INF}║   TikTok Video Autogenerator  (tkvideobulk)  ║{_RST}")
+    print(f"{_INF}║   TikTok Video Autogenerator (tkvideobulk)   ║{_RST}")
     print(f"{_INF}╚══════════════════════════════════════════════╝{_RST}\n")
 
     validate_ffmpeg()
@@ -374,67 +466,33 @@ def main():
     if not videos or not audios:
         return
 
-    total_tasks = len(videos) * len(audios)
-    log_info(f"Found {len(videos)} video(s) × {len(audios)} music track(s) = {total_tasks} output(s).\n")
+    # Pair each video with every music track, and generate 2 videos per combination (using the 2 highest energy peaks)
+    tasks = []
+    for vpath in videos:
+        for apath in audios:
+            tasks.append((vpath, apath, 0)) # 1st peak
+            tasks.append((vpath, apath, 1)) # 2nd peak
 
-    ok = fail = 0
-    current = 0
+    total_tasks = len(tasks)
+    log_info(f"Found {len(videos)} video(s) and {len(audios)} audio(s). Generating 2 clips each per combination.")
+    log_info(f"Total outputs to render: {total_tasks}\n")
 
-    def print_progress():
-        pct = int(current / total_tasks * 100) if total_tasks else 100
-        bar_len = 30
-        filled = int(bar_len * current / total_tasks) if total_tasks else bar_len
-        bar = "█" * filled + "░" * (bar_len - filled)
-        sys.stdout.write(f"\r{_INF}  [{bar}] {pct}%  ({current}/{total_tasks}){_RST}  ")
-        sys.stdout.flush()
+    # Use CPU count for Apple Silicon multi-threading
+    cpu_count = os.cpu_count() or 4
+    # Max out at 4 or cpu_count to avoid overwhelming disk I/O, but allow scaling
+    max_workers = max(1, cpu_count)
+    log_info(f"Starting parallel execution using ThreadPoolExecutor with {max_workers} workers.\n")
 
-    print_progress()
+    ok = 0
+    fail = 0
 
-    for vi, vpath in enumerate(videos, 1):
-        vname = os.path.basename(vpath)
-        print(f"\n{_DIM}[{vi}/{len(videos)}]{_RST} Video: {_INF}{vname}{_RST}")
-
-        try:
-            info = get_video_info(vpath)
-            dur = info["duration"]
-            dur_str = format_duration(dur)
-            log_info(f"  {info['width']}×{info['height']}  |  {dur:.2f}s ({dur_str})")
-
-            sv = sanitize_name(vpath)
-
-            for apath in audios:
-                aname = os.path.basename(apath)
-                sa = sanitize_name(apath)
-
-                log_info(f"  🎵 Analyzing: {aname}")
-                t0, loop = analyze_audio(apath, dur)
-
-                if loop:
-                    log_info(f"     Start: 0.00s (looping — music shorter than video)")
-                else:
-                    log_info(f"     Start: {t0:.2f}s")
-
-                out = unique_output_path(sv, dur_str, sa)
-                outname = os.path.basename(out)
-                log_info(f"     Rendering → {outname}")
-
-                try:
-                    render(vpath, apath, t0, loop, dur, out, info)
-                    append_report(vname, aname, t0, loop, dur, outname)
-                    log_success(f"  ✓ {outname}")
-                    ok += 1
-                except Exception as e:
-                    log_error(f"  ✗ {vname} + {aname}: {e}")
-                    fail += 1
-
-                current += 1
-                print_progress()
-
-        except Exception as e:
-            log_error(f"  Could not read '{vname}': {e}")
-            fail += 1
-            current += len(audios)
-            print_progress()
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(process_task, vpath, apath, peak_index, total_tasks) for vpath, apath, peak_index in tasks]
+        for fut in futures:
+            if fut.result():
+                ok += 1
+            else:
+                fail += 1
 
     print(f"\n\n{_INF}══════════════════════════════════════════════{_RST}")
     print(f"  {_OK}Done!{_RST}  Generated: {ok}  |  Failed: {fail}")
