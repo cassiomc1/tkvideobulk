@@ -5,6 +5,11 @@ TikTok Auto Video Generator (tkvideobulk)
 Batch-processes videos from ./in-video, pairs each with every music track
 from ./in-wav, extracts the highest-energy segment, and renders
 vertical 1080x1920 TikTok-ready clips into ./out-video.
+
+Throttling:
+  - Workers capped at cpu_count//2, max 3, to leave headroom for the OS.
+  - FFmpeg runs with low process priority (nice +10) and limited encoder threads.
+  - A background monitor pauses the queue if CPU or RAM exceeds safe thresholds.
 """
 
 import os
@@ -15,6 +20,7 @@ import shutil
 import tempfile
 import warnings
 import subprocess
+import time
 from datetime import datetime
 
 warnings.filterwarnings("ignore")
@@ -32,7 +38,13 @@ SUPPORTED_AUDIO_EXTS = {".wav", ".mp3", ".flac", ".m4a"}
 import threading
 import random
 import hashlib
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+try:
+    import psutil
+    _HAS_PSUTIL = True
+except ImportError:
+    _HAS_PSUTIL = False
 
 _RST = "\033[0m"
 _INF = "\033[94m"
@@ -43,6 +55,45 @@ _DIM = "\033[90m"
 
 print_lock = threading.Lock()
 report_lock = threading.Lock()
+
+# ── Resource throttle ────────────────────────────────────────────────────────
+# When CPU or RAM exceeds these limits the queue pauses until it drops.
+_CPU_PAUSE_THRESHOLD  = 80.0   # %  — pause submitting new tasks above this
+_CPU_RESUME_THRESHOLD = 60.0   # %  — resume when it drops to here
+_RAM_PAUSE_THRESHOLD  = 85.0   # %  — same logic for RAM
+_RAM_RESUME_THRESHOLD = 70.0   # %
+_MONITOR_INTERVAL     = 5      # seconds between resource checks
+
+_throttle_event = threading.Event()  # set = normal, clear = paused
+_throttle_event.set()
+_monitor_stop   = threading.Event()
+
+def _resource_monitor():
+    """Background thread: monitors CPU/RAM and pauses task submissions."""
+    if not _HAS_PSUTIL:
+        return
+    while not _monitor_stop.is_set():
+        cpu = psutil.cpu_percent(interval=_MONITOR_INTERVAL)
+        ram = psutil.virtual_memory().percent
+        if cpu > _CPU_PAUSE_THRESHOLD or ram > _RAM_PAUSE_THRESHOLD:
+            if _throttle_event.is_set():
+                with print_lock:
+                    print(f"{_WRN}[THROTTLE]{_RST} CPU={cpu:.0f}%  RAM={ram:.0f}%  — pausing queue…")
+            _throttle_event.clear()
+        elif cpu < _CPU_RESUME_THRESHOLD and ram < _RAM_RESUME_THRESHOLD:
+            if not _throttle_event.is_set():
+                with print_lock:
+                    print(f"{_OK}[THROTTLE]{_RST} CPU={cpu:.0f}%  RAM={ram:.0f}%  — resuming queue.")
+            _throttle_event.set()
+
+def start_monitor():
+    t = threading.Thread(target=_resource_monitor, daemon=True, name="ResourceMonitor")
+    t.start()
+    return t
+
+def stop_monitor():
+    _monitor_stop.set()
+    _throttle_event.set()  # unblock any waiting threads on exit
 
 def log_info(msg):
     with print_lock:
@@ -320,11 +371,32 @@ def _video_filter(w, h):
         )
 
 # ── FFmpeg render ────────────────────────────────────────────────────────────
+# Number of encoder threads passed to ffmpeg (kept conservative)
+_CPU_COUNT   = os.cpu_count() or 4
+_FFMPEG_THREADS = max(1, _CPU_COUNT // 2)   # use half the cores inside ffmpeg
+
+def _ffmpeg_low_prio_kwargs():
+    """Returns subprocess kwargs that start ffmpeg at a lower OS priority."""
+    import sys as _sys
+    kw = {}
+    if _sys.platform != "win32":
+        # nice() in the child before exec
+        def _preexec():
+            try:
+                os.nice(10)
+            except Exception:
+                pass
+        kw["preexec_fn"] = _preexec
+    return kw
+
+
 def render(video_path, audio_path, start_time, should_loop,
            video_duration, output_path, video_info):
     """
     Builds and runs the FFmpeg command. Both video and audio filters
     live inside a single -filter_complex to avoid stream-mapping bugs.
+    FFmpeg is started with low OS priority and a limited thread count
+    so it doesn't starve the rest of the system.
     """
     vf = _video_filter(video_info["width"], video_info["height"])
 
@@ -346,7 +418,8 @@ def render(video_path, audio_path, start_time, should_loop,
         f"[0:a]{audio_filters}[aout]"
     )
 
-    cmd = ["ffmpeg", "-y"]
+    cmd = ["ffmpeg", "-y",
+           "-threads", str(_FFMPEG_THREADS)]  # limit encoder thread count
 
     # Audio input (with seeking or looping)
     if should_loop:
@@ -373,7 +446,8 @@ def render(video_path, audio_path, start_time, should_loop,
         output_path,
     ]
 
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    r = subprocess.run(cmd, capture_output=True, text=True,
+                       **_ffmpeg_low_prio_kwargs())
     if r.returncode != 0:
         raise RuntimeError(f"FFmpeg failed:\n{r.stderr[-2000:]}")
 
@@ -466,33 +540,57 @@ def main():
     if not videos or not audios:
         return
 
-    # Pair each video with every music track, and generate 2 videos per combination (using the 2 highest energy peaks)
+    # Pair each video with every music track → 2 clips per pair (2 energy peaks)
     tasks = []
     for vpath in videos:
         for apath in audios:
-            tasks.append((vpath, apath, 0)) # 1st peak
-            tasks.append((vpath, apath, 1)) # 2nd peak
+            tasks.append((vpath, apath, 0))  # 1st highest-energy peak
+            tasks.append((vpath, apath, 1))  # 2nd highest-energy peak
 
     total_tasks = len(tasks)
-    log_info(f"Found {len(videos)} video(s) and {len(audios)} audio(s). Generating 2 clips each per combination.")
-    log_info(f"Total outputs to render: {total_tasks}\n")
 
-    # Use CPU count for Apple Silicon multi-threading
-    cpu_count = os.cpu_count() or 4
-    # Max out at 4 or cpu_count to avoid overwhelming disk I/O, but allow scaling
-    max_workers = max(1, cpu_count)
-    log_info(f"Starting parallel execution using ThreadPoolExecutor with {max_workers} workers.\n")
+    # ── Throttled worker count ──────────────────────────────────────────────
+    cpu_count   = os.cpu_count() or 4
+    # Use at most half the CPUs, capped at 3, so the OS stays responsive
+    max_workers = min(3, max(1, cpu_count // 2))
+
+    log_info(f"Found {len(videos)} video(s) and {len(audios)} audio(s).")
+    log_info(f"Generating 2 clips per (video × music) combination.")
+    log_info(f"Total outputs to render: {total_tasks}")
+    log_info(f"Workers: {max_workers}  |  FFmpeg encoder threads: {_FFMPEG_THREADS}")
+    log_info(f"CPU pause threshold: {_CPU_PAUSE_THRESHOLD}%  |  RAM pause threshold: {_RAM_PAUSE_THRESHOLD}%")
+    if not _HAS_PSUTIL:
+        log_warning("psutil not installed — resource monitoring disabled. "
+                    "Install with: pip install psutil")
+    print()
+
+    # Start background resource monitor
+    monitor_thread = start_monitor()
 
     ok = 0
     fail = 0
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(process_task, vpath, apath, peak_index, total_tasks) for vpath, apath, peak_index in tasks]
-        for fut in futures:
-            if fut.result():
-                ok += 1
-            else:
-                fail += 1
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {}
+            for vpath, apath, peak_index in tasks:
+                # Block here if CPU/RAM is too high
+                if not _throttle_event.wait(timeout=300):
+                    log_warning("Throttle wait timed out — continuing anyway.")
+                future = executor.submit(
+                    process_task, vpath, apath, peak_index, total_tasks
+                )
+                future_map[future] = (vpath, apath, peak_index)
+                # Small delay between submissions to stagger I/O bursts
+                time.sleep(0.3)
+
+            for fut in as_completed(future_map):
+                if fut.result():
+                    ok += 1
+                else:
+                    fail += 1
+    finally:
+        stop_monitor()
 
     print(f"\n\n{_INF}══════════════════════════════════════════════{_RST}")
     print(f"  {_OK}Done!{_RST}  Generated: {ok}  |  Failed: {fail}")
@@ -504,5 +602,6 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
+        stop_monitor()
         print("\nInterrupted.")
         sys.exit(0)
