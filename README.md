@@ -11,8 +11,8 @@ Batch-processing Python tool that automatically generates TikTok-style vertical 
 - **TikTok Vertical Format** — Crops and scales any input to **1080×1920** (9:16). Horizontal videos are center-cropped; vertical ones scaled perfectly.
 - **Clean Audio Pipeline** — Dynamic volume normalisation (`dynaudnorm`), smooth fade-in/out, consistent 44.1 kHz sample rate, AAC 192 kbps output.
 - **Post-Render Verification** — Automatically checks each output file has a valid audio stream before marking it as successful.
-- **Auto-Cleanup** — After all outputs for a source video succeed, the original is removed from `in-video/` so it won't be re-processed on the next run.
-- **Safe Naming** — Output format: `videoname-00m15s-musicname.mp4`. Numeric suffixes (`-01`, `-02`, …) prevent overwrites.
+- **Two Energy Peaks** — Generates two clips for each video/music pair, using the two strongest non-overlapping music segments.
+- **Safe Naming** — Output format: `videoname-00m15s-musicname_v1.mp4`. Numeric suffixes (`-01`, `-02`, …) prevent overwrites.
 
 ---
 
@@ -67,23 +67,21 @@ Folders are created automatically if they don't exist.
 python main.py
 ```
 
-Each video is paired with **every** music track, so 3 videos × 2 songs = 6 output files.
-
-After successful processing, source videos are automatically removed from `in-video/`.
+Each video is paired with **every** music track and produces two clips, so 3 videos × 2 songs × 2 peaks = 12 output files. Source files are preserved.
 
 ---
 
 ## Output Naming
 
 ```
-videoname-duration-musicname.mp4
+videoname-duration-musicname_v1.mp4
 ```
 
 **Example:**
 | Input Video | Input Audio | Output |
 |---|---|---|
-| `Beach Volleyball.mov` (15s) | `Dark_Beat.mp3` | `beachvolleyball-00m15s-darkbeat.mp4` |
-| (same, run again) | (same) | `beachvolleyball-00m15s-darkbeat-01.mp4` |
+| `Beach Volleyball.mov` (15s) | `Dark_Beat.mp3` | `beachvolleyball-00m15s-darkbeat_v1.mp4` |
+| (second peak) | (same) | `beachvolleyball-00m15s-darkbeat_v2.mp4` |
 
 Rules: lowercase, no spaces/special chars, duration in `XXmYYs` format.
 

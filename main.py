@@ -20,7 +20,6 @@ import shutil
 import tempfile
 import warnings
 import subprocess
-import time
 from datetime import datetime
 
 warnings.filterwarnings("ignore")
@@ -87,6 +86,8 @@ def _resource_monitor():
             _throttle_event.set()
 
 def start_monitor():
+    _monitor_stop.clear()
+    _throttle_event.set()
     t = threading.Thread(target=_resource_monitor, daemon=True, name="ResourceMonitor")
     t.start()
     return t
@@ -373,7 +374,7 @@ def _video_filter(w, h):
 # ── FFmpeg render ────────────────────────────────────────────────────────────
 # Number of encoder threads passed to ffmpeg (kept conservative)
 _CPU_COUNT   = os.cpu_count() or 4
-_FFMPEG_THREADS = max(1, _CPU_COUNT // 2)   # use half the cores inside ffmpeg
+_FFMPEG_THREADS = max(1, _CPU_COUNT // 3)   # up to 3 workers share the CPUs
 
 def _ffmpeg_low_prio_kwargs():
     """Returns subprocess kwargs that start ffmpeg at a lower OS priority."""
@@ -418,8 +419,7 @@ def render(video_path, audio_path, start_time, should_loop,
         f"[0:a]{audio_filters}[aout]"
     )
 
-    cmd = ["ffmpeg", "-y",
-           "-threads", str(_FFMPEG_THREADS)]  # limit encoder thread count
+    cmd = ["ffmpeg", "-y"]
 
     # Audio input (with seeking or looping)
     if should_loop:
@@ -435,6 +435,7 @@ def render(video_path, audio_path, start_time, should_loop,
         "-map", "[vout]",
         "-map", "[aout]",
         "-c:v", "libx264",
+        "-threads", str(_FFMPEG_THREADS),
         "-pix_fmt", "yuv420p",
         "-crf", "20",
         "-preset", "medium",
@@ -491,6 +492,7 @@ def process_task(vpath, apath, peak_index, total_tasks):
     aname = os.path.basename(apath)
     
     try:
+        _throttle_event.wait()
         info = get_video_info(vpath)
         dur = info["duration"]
         dur_str = format_duration(dur)
@@ -581,9 +583,6 @@ def main():
                     process_task, vpath, apath, peak_index, total_tasks
                 )
                 future_map[future] = (vpath, apath, peak_index)
-                # Small delay between submissions to stagger I/O bursts
-                time.sleep(0.3)
-
             for fut in as_completed(future_map):
                 if fut.result():
                     ok += 1
