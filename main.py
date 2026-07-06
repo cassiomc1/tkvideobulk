@@ -32,6 +32,7 @@ REPORT_FILE = "./report.txt"
 
 SUPPORTED_VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi"}
 SUPPORTED_AUDIO_EXTS = {".wav", ".mp3", ".flac", ".m4a"}
+SHORTS_MAX_DURATION = 180.0
 
 # ── Logging helpers ──────────────────────────────────────────────────────────
 import threading
@@ -435,13 +436,15 @@ def render(video_path, audio_path, start_time, should_loop,
         "-map", "[vout]",
         "-map", "[aout]",
         "-c:v", "libx264",
+        "-profile:v", "high",
         "-threads", str(_FFMPEG_THREADS),
         "-pix_fmt", "yuv420p",
         "-crf", "20",
         "-preset", "medium",
         "-c:a", "aac",
         "-b:a", "192k",
-        "-ar", "44100",
+        "-ar", "48000",
+        "-movflags", "+faststart",
         "-shortest",                   # stop when the shortest stream ends
         "-t", f"{video_duration:.3f}",
         output_path,
@@ -452,16 +455,24 @@ def render(video_path, audio_path, start_time, should_loop,
     if r.returncode != 0:
         raise RuntimeError(f"FFmpeg failed:\n{r.stderr[-2000:]}")
 
-    # Verify the output actually has an audio stream with data
+    # Verify the output is a vertical YouTube Short with audio.
     probe = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "a:0",
-         "-show_entries", "stream=codec_name,duration",
+        ["ffprobe", "-v", "error",
+         "-show_entries", "stream=codec_type,codec_name,width,height:format=duration",
          "-of", "json", output_path],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=True,
     )
     info = json.loads(probe.stdout)
-    if not info.get("streams"):
+    streams = info.get("streams", [])
+    video = next((s for s in streams if s.get("codec_type") == "video"), None)
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    duration = float(info.get("format", {}).get("duration", 0))
+    if not audio:
         raise RuntimeError("Output file has no audio stream — render failed silently.")
+    if not video or video.get("width", 0) >= video.get("height", 0):
+        raise RuntimeError("Output is not vertical — YouTube would not classify it as a Short.")
+    if duration > SHORTS_MAX_DURATION + 0.1:
+        raise RuntimeError("Output exceeds YouTube Shorts' 3-minute limit.")
 
 # ── Report logger ────────────────────────────────────────────────────────────
 def append_report(video_name, music_name, start_time, looped, duration, output_name):
@@ -494,7 +505,7 @@ def process_task(vpath, apath, peak_index, total_tasks):
     try:
         _throttle_event.wait()
         info = get_video_info(vpath)
-        dur = info["duration"]
+        dur = min(info["duration"], SHORTS_MAX_DURATION)
         dur_str = format_duration(dur)
         sv = sanitize_name(vpath)
         sa = sanitize_name(apath)

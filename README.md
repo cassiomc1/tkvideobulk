@@ -1,6 +1,6 @@
 # TikTok Auto Video Generator (`tkvideobulk`)
 
-Batch-processing Python tool that automatically generates TikTok-style vertical videos (1080×1920) by combining source videos with the highest-energy segments of music tracks.
+Batch-processing Python tool that automatically generates YouTube Shorts-ready vertical videos (1080×1920) by combining source videos with the highest-energy segments of music tracks.
 
 ---
 
@@ -8,9 +8,9 @@ Batch-processing Python tool that automatically generates TikTok-style vertical 
 
 - **High-Energy Audio Detection** — Scans each music file (RMS volume + onset/beat density) and picks the segment with the most impact to match the video duration.
 - **Auto-Looping** — If a music track is shorter than the video, it loops seamlessly.
-- **TikTok Vertical Format** — Crops and scales any input to **1080×1920** (9:16). Horizontal videos are center-cropped; vertical ones scaled perfectly.
-- **Clean Audio Pipeline** — Dynamic volume normalisation (`dynaudnorm`), smooth fade-in/out, consistent 44.1 kHz sample rate, AAC 192 kbps output.
-- **Post-Render Verification** — Automatically checks each output file has a valid audio stream before marking it as successful.
+- **YouTube Shorts Format** — Crops and scales any input to **1080×1920** (9:16), limits clips to 3 minutes, and exports MP4 with H.264/AAC and fast start.
+- **Clean Audio Pipeline** — Dynamic volume normalisation (`dynaudnorm`), smooth fade-in/out, consistent 48 kHz sample rate, AAC 192 kbps output.
+- **Post-Render Verification** — Automatically checks each output is vertical, at most 3 minutes long, and has audio.
 - **Two Energy Peaks** — Generates two clips for each video/music pair, using the two strongest non-overlapping music segments.
 - **Safe Naming** — Output format: `videoname-00m15s-musicname_v1.mp4`. Numeric suffixes (`-01`, `-02`, …) prevent overwrites.
 
