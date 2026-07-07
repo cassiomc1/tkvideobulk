@@ -22,6 +22,15 @@ class ShortsOutputTest(unittest.TestCase):
         self.assertIn("FILA PAUSADA", output.getvalue())
         self.assertIn("Recursos insuficientes", output.getvalue())
 
+    def test_queue_pauses_only_above_ninety_percent_cpu(self):
+        for cpu, should_run in ((90.0, True), (90.1, False)):
+            main._throttle_event.set()
+            with patch.object(main._monitor_stop, "is_set", side_effect=[False, True]), \
+                 patch("main.psutil.cpu_percent", return_value=cpu), \
+                 patch("main.tui_status"):
+                main._resource_monitor()
+            self.assertEqual(main._throttle_event.is_set(), should_run)
+
     @patch("main.append_report")
     @patch("main.analyze_audio", return_value=(0.0, False))
     @patch("main.render")
