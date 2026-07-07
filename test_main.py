@@ -1,10 +1,25 @@
 import unittest
+from io import StringIO
 from unittest.mock import patch
 
 import main
 
 
 class ShortsOutputTest(unittest.TestCase):
+    @patch("builtins.input", side_effect=["3", "", "1"])
+    def test_video_count_menu_validates_and_defaults_to_two(self, _input):
+        with patch("main.log_warning") as warning:
+            self.assertEqual(main.ask_videos_per_music(), 2)
+            self.assertEqual(main.ask_videos_per_music(), 1)
+        warning.assert_called_once()
+
+    def test_tui_status_shows_paused_queue_message(self):
+        output = StringIO()
+        with patch("sys.stdout", output):
+            main.tui_status("FILA PAUSADA", "Recursos insuficientes", main._WRN)
+        self.assertIn("FILA PAUSADA", output.getvalue())
+        self.assertIn("Recursos insuficientes", output.getvalue())
+
     @patch("main.append_report")
     @patch("main.analyze_audio", return_value=(0.0, False))
     @patch("main.render")
