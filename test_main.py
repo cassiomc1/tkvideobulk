@@ -3,9 +3,15 @@ from io import StringIO
 from unittest.mock import patch
 
 import main
+import numpy as np
 
 
 class ShortsOutputTest(unittest.TestCase):
+    def test_selects_distinct_strong_sections_after_second_video(self):
+        scores = np.array([10.0, 9.0, 1.0, 8.0, 7.0, 1.0, 6.0])
+        selected = [main._select_strong_window(scores, 2, i, np) for i in range(3)]
+        self.assertEqual(selected, [0, 3, 6])
+
     @patch("main.normalize_terminal_return")
     @patch("builtins.input", side_effect=["abc", "5", ""])
     def test_video_count_menu_accepts_return_and_any_positive_number(self, _input, normalize):
