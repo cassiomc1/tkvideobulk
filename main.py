@@ -63,7 +63,24 @@ def tui_status(title, message, color=_INF):
         print(f"{color}│{_RST} {message}")
         print(f"{color}└{'─' * 46}┘{_RST}")
 
+def normalize_terminal_return():
+    """Make macOS Return submit input instead of echoing ^M."""
+    if not sys.stdin.isatty():
+        return
+    try:
+        import termios
+    except ImportError:
+        return
+    try:
+        attrs = termios.tcgetattr(sys.stdin)
+        attrs[0] |= termios.ICRNL
+        attrs[3] |= termios.ICANON | termios.ECHO
+        termios.tcsetattr(sys.stdin, termios.TCSANOW, attrs)
+    except (OSError, termios.error):
+        pass
+
 def ask_videos_per_music():
+    normalize_terminal_return()
     while True:
         answer = input("Quantos vídeos gerar por música? [2]: ").strip() or "2"
         if answer.isdigit() and int(answer) > 0:
