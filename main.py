@@ -229,6 +229,25 @@ def convert_to_wav(src, dst):
     )
 
 # ── Energy analysis ──────────────────────────────────────────────────────────
+def _select_strong_window(sums, win, peak_index, np):
+    """Select the Nth strongest window, keeping chosen sections distinct."""
+    candidates = sums.copy()
+    selected = 0
+    best = 0
+    while selected <= peak_index:
+        best = int(np.argmax(candidates))
+        if not np.isfinite(candidates[best]):
+            # ponytail: allow overlap only when the song cannot fit more full sections.
+            candidates = sums.copy()
+            for _ in range(selected):
+                previous = int(np.argmax(candidates))
+                candidates[max(0, previous - win // 2):previous + win // 2 + 1] = -np.inf
+            best = int(np.argmax(candidates))
+        candidates[max(0, best - win + 1):best + win] = -np.inf
+        selected += 1
+    return best
+
+
 def _analyze_wav_librosa(path, seg_dur, peak_index=0):
     """Finds highest-energy window using librosa RMS + onset strength."""
     import librosa
@@ -256,23 +275,7 @@ def _analyze_wav_librosa(path, seg_dur, peak_index=0):
         return 0.0, False
 
     sums = np.convolve(score, np.ones(win), mode="valid")
-    best1 = int(np.argmax(sums))
-    if peak_index == 0:
-        best = best1
-    else:
-        sums_copy = sums.copy()
-        start_idx = max(0, best1 - win)
-        end_idx = min(len(sums), best1 + win)
-        sums_copy[start_idx:end_idx] = -1e9
-        if np.max(sums_copy) < -1e8:
-            sums_copy = sums.copy()
-            start_idx = max(0, best1 - win // 2)
-            end_idx = min(len(sums), best1 + win // 2)
-            sums_copy[start_idx:end_idx] = -1e9
-        if np.max(sums_copy) < -1e8:
-            best = (best1 + len(sums) // 2) % len(sums)
-        else:
-            best = int(np.argmax(sums_copy))
+    best = _select_strong_window(sums, win, peak_index, np)
 
     t = best * hop / sr
     if t + seg_dur > total:
@@ -326,23 +329,7 @@ def _analyze_wav_numpy(path, seg_dur, peak_index=0):
         return 0.0, False
 
     sums = np.convolve(score, np.ones(win), mode="valid")
-    best1 = int(np.argmax(sums))
-    if peak_index == 0:
-        best = best1
-    else:
-        sums_copy = sums.copy()
-        start_idx = max(0, best1 - win)
-        end_idx = min(len(sums), best1 + win)
-        sums_copy[start_idx:end_idx] = -1e9
-        if np.max(sums_copy) < -1e8:
-            sums_copy = sums.copy()
-            start_idx = max(0, best1 - win // 2)
-            end_idx = min(len(sums), best1 + win // 2)
-            sums_copy[start_idx:end_idx] = -1e9
-        if np.max(sums_copy) < -1e8:
-            best = (best1 + len(sums) // 2) % len(sums)
-        else:
-            best = int(np.argmax(sums_copy))
+    best = _select_strong_window(sums, win, peak_index, np)
 
     t = best * hop / sr
     if t + seg_dur > total:
