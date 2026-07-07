@@ -56,6 +56,20 @@ _DIM = "\033[90m"
 print_lock = threading.Lock()
 report_lock = threading.Lock()
 
+def tui_status(title, message, color=_INF):
+    """Print a compact status card without requiring a TUI dependency."""
+    with print_lock:
+        print(f"\n{color}┌─ {title} {'─' * max(1, 43 - len(title))}┐{_RST}")
+        print(f"{color}│{_RST} {message}")
+        print(f"{color}└{'─' * 46}┘{_RST}")
+
+def ask_videos_per_music():
+    while True:
+        answer = input("Quantos vídeos gerar por música? [2]: ").strip() or "2"
+        if answer in {"1", "2"}:
+            return int(answer)
+        log_warning("Digite 1 ou 2 (há dois picos de energia disponíveis por música).")
+
 # ── Resource throttle ────────────────────────────────────────────────────────
 # When CPU or RAM exceeds these limits the queue pauses until it drops.
 _CPU_PAUSE_THRESHOLD  = 80.0   # %  — pause submitting new tasks above this
@@ -77,13 +91,19 @@ def _resource_monitor():
         ram = psutil.virtual_memory().percent
         if cpu > _CPU_PAUSE_THRESHOLD or ram > _RAM_PAUSE_THRESHOLD:
             if _throttle_event.is_set():
-                with print_lock:
-                    print(f"{_WRN}[THROTTLE]{_RST} CPU={cpu:.0f}%  RAM={ram:.0f}%  — pausing queue…")
+                tui_status(
+                    "FILA PAUSADA",
+                    f"Recursos insuficientes: CPU {cpu:.0f}% | RAM {ram:.0f}%. Aguardando liberar…",
+                    _WRN,
+                )
             _throttle_event.clear()
         elif cpu < _CPU_RESUME_THRESHOLD and ram < _RAM_RESUME_THRESHOLD:
             if not _throttle_event.is_set():
-                with print_lock:
-                    print(f"{_OK}[THROTTLE]{_RST} CPU={cpu:.0f}%  RAM={ram:.0f}%  — resuming queue.")
+                tui_status(
+                    "FILA RETOMADA",
+                    f"Recursos disponíveis: CPU {cpu:.0f}% | RAM {ram:.0f}%. Gerando novamente.",
+                    _OK,
+                )
             _throttle_event.set()
 
 def start_monitor():
@@ -536,9 +556,7 @@ def process_task(vpath, apath, peak_index, total_tasks):
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 def main():
-    print(f"\n{_INF}╔══════════════════════════════════════════════╗{_RST}")
-    print(f"{_INF}║   TikTok Video Autogenerator (tkvideobulk)   ║{_RST}")
-    print(f"{_INF}╚══════════════════════════════════════════════╝{_RST}\n")
+    tui_status("TKVIDEOBULK", "Gerador em lote de vídeos verticais")
 
     validate_ffmpeg()
     ensure_dirs()
@@ -553,12 +571,14 @@ def main():
     if not videos or not audios:
         return
 
-    # Pair each video with every music track → 2 clips per pair (2 energy peaks)
+    videos_per_music = ask_videos_per_music()
+
+    # Pair each video with every music track, using the requested energy peaks.
     tasks = []
     for vpath in videos:
         for apath in audios:
-            tasks.append((vpath, apath, 0))  # 1st highest-energy peak
-            tasks.append((vpath, apath, 1))  # 2nd highest-energy peak
+            for peak_index in range(videos_per_music):
+                tasks.append((vpath, apath, peak_index))
 
     total_tasks = len(tasks)
 
@@ -568,7 +588,7 @@ def main():
     max_workers = min(3, max(1, cpu_count // 2))
 
     log_info(f"Found {len(videos)} video(s) and {len(audios)} audio(s).")
-    log_info(f"Generating 2 clips per (video × music) combination.")
+    log_info(f"Generating {videos_per_music} clip(s) per (video × music) combination.")
     log_info(f"Total outputs to render: {total_tasks}")
     log_info(f"Workers: {max_workers}  |  FFmpeg encoder threads: {_FFMPEG_THREADS}")
     log_info(f"CPU pause threshold: {_CPU_PAUSE_THRESHOLD}%  |  RAM pause threshold: {_RAM_PAUSE_THRESHOLD}%")
@@ -576,6 +596,7 @@ def main():
         log_warning("psutil not installed — resource monitoring disabled. "
                     "Install with: pip install psutil")
     print()
+    tui_status("GERAÇÃO INICIADA", f"{total_tasks} vídeos na fila | {max_workers} workers", _OK)
 
     # Start background resource monitor
     monitor_thread = start_monitor()
