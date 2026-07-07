@@ -88,11 +88,8 @@ def ask_videos_per_music():
         log_warning("Digite um número inteiro maior que zero.")
 
 # ── Resource throttle ────────────────────────────────────────────────────────
-# When CPU or RAM exceeds these limits the queue pauses until it drops.
-_CPU_PAUSE_THRESHOLD  = 80.0   # %  — pause submitting new tasks above this
-_CPU_RESUME_THRESHOLD = 60.0   # %  — resume when it drops to here
-_RAM_PAUSE_THRESHOLD  = 85.0   # %  — same logic for RAM
-_RAM_RESUME_THRESHOLD = 70.0   # %
+# The queue pauses only while CPU usage is above this limit.
+_CPU_PAUSE_THRESHOLD  = 90.0
 _MONITOR_INTERVAL     = 5      # seconds between resource checks
 
 _throttle_event = threading.Event()  # set = normal, clear = paused
@@ -100,25 +97,24 @@ _throttle_event.set()
 _monitor_stop   = threading.Event()
 
 def _resource_monitor():
-    """Background thread: monitors CPU/RAM and pauses task submissions."""
+    """Background thread: pauses the queue only when CPU usage exceeds 90%."""
     if not _HAS_PSUTIL:
         return
     while not _monitor_stop.is_set():
         cpu = psutil.cpu_percent(interval=_MONITOR_INTERVAL)
-        ram = psutil.virtual_memory().percent
-        if cpu > _CPU_PAUSE_THRESHOLD or ram > _RAM_PAUSE_THRESHOLD:
+        if cpu > _CPU_PAUSE_THRESHOLD:
             if _throttle_event.is_set():
                 tui_status(
                     "FILA PAUSADA",
-                    f"Recursos insuficientes: CPU {cpu:.0f}% | RAM {ram:.0f}%. Aguardando liberar…",
+                    f"Processador em {cpu:.0f}%. Aguardando ficar abaixo de {_CPU_PAUSE_THRESHOLD:.0f}%…",
                     _WRN,
                 )
             _throttle_event.clear()
-        elif cpu < _CPU_RESUME_THRESHOLD and ram < _RAM_RESUME_THRESHOLD:
+        else:
             if not _throttle_event.is_set():
                 tui_status(
                     "FILA RETOMADA",
-                    f"Recursos disponíveis: CPU {cpu:.0f}% | RAM {ram:.0f}%. Gerando novamente.",
+                    f"Processador em {cpu:.0f}%. Gerando novamente.",
                     _OK,
                 )
             _throttle_event.set()
@@ -608,7 +604,7 @@ def main():
     log_info(f"Generating {videos_per_music} clip(s) per (video × music) combination.")
     log_info(f"Total outputs to render: {total_tasks}")
     log_info(f"Workers: {max_workers}  |  FFmpeg encoder threads: {_FFMPEG_THREADS}")
-    log_info(f"CPU pause threshold: {_CPU_PAUSE_THRESHOLD}%  |  RAM pause threshold: {_RAM_PAUSE_THRESHOLD}%")
+    log_info(f"CPU pause threshold: above {_CPU_PAUSE_THRESHOLD}%")
     if not _HAS_PSUTIL:
         log_warning("psutil not installed — resource monitoring disabled. "
                     "Install with: pip install psutil")
@@ -625,7 +621,7 @@ def main():
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_map = {}
             for vpath, apath, peak_index in tasks:
-                # Block here if CPU/RAM is too high
+                # Block here if CPU usage is above the limit
                 if not _throttle_event.wait(timeout=300):
                     log_warning("Throttle wait timed out — continuing anyway.")
                 future = executor.submit(
