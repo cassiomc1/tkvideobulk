@@ -6,12 +6,14 @@ import main
 
 
 class ShortsOutputTest(unittest.TestCase):
+    @patch("main.normalize_terminal_return")
     @patch("builtins.input", side_effect=["abc", "5", ""])
-    def test_video_count_menu_accepts_return_and_any_positive_number(self, _input):
+    def test_video_count_menu_accepts_return_and_any_positive_number(self, _input, normalize):
         with patch("main.log_warning") as warning:
             self.assertEqual(main.ask_videos_per_music(), 5)
             self.assertEqual(main.ask_videos_per_music(), 2)
         warning.assert_called_once()
+        self.assertEqual(normalize.call_count, 2)
 
     def test_tui_status_shows_paused_queue_message(self):
         output = StringIO()
