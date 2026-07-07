@@ -66,9 +66,9 @@ def tui_status(title, message, color=_INF):
 def ask_videos_per_music():
     while True:
         answer = input("Quantos vídeos gerar por música? [2]: ").strip() or "2"
-        if answer in {"1", "2"}:
+        if answer.isdigit() and int(answer) > 0:
             return int(answer)
-        log_warning("Digite 1 ou 2 (há dois picos de energia disponíveis por música).")
+        log_warning("Digite um número inteiro maior que zero.")
 
 # ── Resource throttle ────────────────────────────────────────────────────────
 # When CPU or RAM exceeds these limits the queue pauses until it drops.
