@@ -209,15 +209,16 @@ def format_duration(secs):
 
 def unique_output_path(video_name, dur_str, music_name):
     base = f"{video_name}-{dur_str}-{music_name}"
-    candidate = os.path.join(OUT_VIDEO_DIR, f"{base}.mp4")
-    if not os.path.exists(candidate):
-        return candidate
-    i = 1
+    i = 0
     while True:
-        candidate = os.path.join(OUT_VIDEO_DIR, f"{base}-{i:02d}.mp4")
-        if not os.path.exists(candidate):
+        suffix = "" if i == 0 else f"-{i:02d}"
+        candidate = os.path.join(OUT_VIDEO_DIR, f"{base}{suffix}.mp4")
+        try:
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
             return candidate
-        i += 1
+        except FileExistsError:
+            i += 1
 
 # ── Audio conversion ─────────────────────────────────────────────────────────
 def convert_to_wav(src, dst):
@@ -470,29 +471,36 @@ def render(video_path, audio_path, start_time, should_loop,
         output_path,
     ]
 
-    r = subprocess.run(cmd, capture_output=True, text=True,
-                       **_ffmpeg_low_prio_kwargs())
-    if r.returncode != 0:
-        raise RuntimeError(f"FFmpeg failed:\n{r.stderr[-2000:]}")
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           **_ffmpeg_low_prio_kwargs())
+        if r.returncode != 0:
+            raise RuntimeError(f"FFmpeg failed:\n{r.stderr[-2000:]}")
 
-    # Verify the output is a vertical YouTube Short with audio.
-    probe = subprocess.run(
-        ["ffprobe", "-v", "error",
-         "-show_entries", "stream=codec_type,codec_name,width,height:format=duration",
-         "-of", "json", output_path],
-        capture_output=True, text=True, check=True,
-    )
-    info = json.loads(probe.stdout)
-    streams = info.get("streams", [])
-    video = next((s for s in streams if s.get("codec_type") == "video"), None)
-    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
-    duration = float(info.get("format", {}).get("duration", 0))
-    if not audio:
-        raise RuntimeError("Output file has no audio stream — render failed silently.")
-    if not video or video.get("width", 0) >= video.get("height", 0):
-        raise RuntimeError("Output is not vertical — YouTube would not classify it as a Short.")
-    if duration > SHORTS_MAX_DURATION + 0.1:
-        raise RuntimeError("Output exceeds YouTube Shorts' 3-minute limit.")
+        # Verify the output is a vertical YouTube Short with audio.
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error",
+             "-show_entries", "stream=codec_type,codec_name,width,height:format=duration",
+             "-of", "json", output_path],
+            capture_output=True, text=True, check=True,
+        )
+        info = json.loads(probe.stdout)
+        streams = info.get("streams", [])
+        video = next((s for s in streams if s.get("codec_type") == "video"), None)
+        audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+        duration = float(info.get("format", {}).get("duration", 0))
+        if not audio:
+            raise RuntimeError("Output file has no audio stream — render failed silently.")
+        if not video or video.get("width", 0) >= video.get("height", 0):
+            raise RuntimeError("Output is not vertical — YouTube would not classify it as a Short.")
+        if duration > SHORTS_MAX_DURATION + 0.1:
+            raise RuntimeError("Output exceeds YouTube Shorts' 3-minute limit.")
+    except Exception:
+        try:
+            os.remove(output_path)
+        except OSError:
+            pass
+        raise
 
 # ── Report logger ────────────────────────────────────────────────────────────
 def append_report(video_name, music_name, start_time, looped, duration, output_name):

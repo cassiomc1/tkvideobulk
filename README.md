@@ -94,4 +94,4 @@ Rules: lowercase, no spaces/special chars, duration in `XXmYYs` format.
 3. **Analyse** the WAV — compute RMS energy and onset strength per frame, then slide a window matching the video duration to find the peak-energy section.
 4. **Render** with FFmpeg — crop/scale video to 9:16, seek/loop the audio to the best segment, normalise volume, apply fades, encode H.264 + AAC.
 5. **Verify** the output has a valid audio stream.
-6. **Clean up** source videos from `in-video/` after all outputs succeed.
+6. **Preserve** the source videos in `in-video/` after processing.
