@@ -4,6 +4,8 @@
 
 O [AGENTS.md](AGENTS.md) documenta o pipeline FFmpeg, seus invariantes de saída e a validação esperada.
 
+Leia a [arquitetura técnica](docs/architecture.md) para o ciclo de análise, renderização, verificação e concorrência.
+
 Batch-processing Python tool that automatically generates YouTube Shorts-ready vertical videos (1080×1920) by combining source videos with the highest-energy segments of music tracks.
 
 ---
